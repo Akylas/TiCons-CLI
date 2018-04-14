@@ -9,26 +9,30 @@ var _ = require('underscore'),
   constants = require('./lib/constants'),
   logger = require('./lib/logger'),
   jobs = require('./lib/jobs'),
-  gm = require('gm');
+  gm = require('gm'),
+  imagemin = require('imagemin'),
+  imageminPngcrush = require('imagemin-pngcrush'),
+  imageminJpegtran = require('imagemin-jpegtran'),
+  imageminPngquant = require('imagemin-pngquant');
 
 /**
  * Generates icons
  * @param  {Object}   opts     options
  * @param  {Function} callback callback(err, output)
  */
-exports.icons = function(opts, callback) {
+exports.icons = function (opts, callback) {
   opts = opts || {};
   opts.type = 'icon';
 
   // config
-  config(opts, function(err, cfg) {
+  config(opts, function (err, cfg) {
 
     if (err) {
       return callback(err);
     }
 
     // create tasks
-    jobs.createTasks(cfg, function(err, tasks) {
+    jobs.createTasks(cfg, function (err, tasks) {
 
       if (err) {
         return callback(err);
@@ -52,19 +56,19 @@ exports.icons = function(opts, callback) {
  * @param  {Object}   opts     options
  * @param  {Function} callback callback(err, output)
  */
-exports.splashes = function(opts, callback) {
+exports.splashes = function (opts, callback) {
   opts = opts || {};
   opts.type = 'splash';
 
   // config
-  config(opts, function(err, cfg) {
+  config(opts, function (err, cfg) {
 
     if (err) {
       return callback(err);
     }
 
     // create tasks
-    jobs.createTasks(cfg, function(err, tasks) {
+    jobs.createTasks(cfg, function (err, tasks) {
 
       if (err) {
         return callback(err);
@@ -88,12 +92,12 @@ exports.splashes = function(opts, callback) {
  * @param  {Object}   opts     options
  * @param  {Function} callback callback(err, output)
  */
-exports.assets = function(opts, callback) {
+exports.assets = function (opts, callback) {
   opts = opts || {};
   opts.type = 'asset';
 
   // config
-  config(opts, function(err, cfg) {
+  config(opts, function (err, cfg) {
 
     if (err) {
       return callback(err);
@@ -104,12 +108,13 @@ exports.assets = function(opts, callback) {
 
     var inputIsUnderOutput = cfg.input.indexOf(path.join(cfg.outputDir, cfg.assetsDir)) === 0;
 
-    jobs.getSpecs(cfg, function(err, specs) {
+    jobs.getSpecs(cfg, function (err, specs) {
+      let outputPaths = [];
       var outputSpecs = {};
       var inputSpec;
 
-      _.each(specs, function(spec, name) {
-
+      _.each(specs, function (spec, name) {
+        outputPaths.push(spec.output);
         if (!inputSpec) {
           var re = new RegExp((spec.suffix || '') + '\.(png|jpg)$');
 
@@ -165,7 +170,7 @@ exports.assets = function(opts, callback) {
                 var suffixFiles = fs.listFilesSync(cfg.input, {
                   recursive: true,
                   prependDir: true,
-                  filter: function(itemPath, itemStat) {
+                  filter: function (itemPath, itemStat) {
                     return itemPath.match(re);
                   }
                 });
@@ -184,6 +189,8 @@ exports.assets = function(opts, callback) {
         outputSpecs[name] = spec;
       });
 
+      console.log(outputSpecs, outputSpecs);
+
       if (!inputSpec) {
         return callback('Could not identify input density.');
       }
@@ -197,7 +204,7 @@ exports.assets = function(opts, callback) {
         files = fs.listFilesSync(cfg.input, {
           recursive: true,
           prependDir: true,
-          filter: function(itemPath, itemStat) {
+          filter: function (itemPath, itemStat) {
 
             // only filter on suffix if our input is in our output dir
             return itemPath.match(new RegExp(((!inputIsUnderOutput || !inputSpec.suffix) ? '' : inputSpec.suffix) + '\.(png|jpg)$'));
@@ -214,14 +221,14 @@ exports.assets = function(opts, callback) {
 
       var tasks = [];
 
-      _.each(files, function(source) {
+      _.each(files, function (source) {
         var sourceTime = fs.statSync(source).mtime;
         var relativePath = source.substr(inputSpec.output.length);
 
         // replace any suffixes from our source
         relativePath = relativePath.replace(/(?:@[0-9]x|~[a-z]+)(\.[a-z]+)$/, '$1');
 
-        _.each(outputSpecs, function(spec, n) {
+        _.each(outputSpecs, function (spec, n) {
 
           if (spec.dpi > inputSpec.dpi) {
             logger.info('Skipped higher dpi: ' + spec.name.cyan);
@@ -237,7 +244,7 @@ exports.assets = function(opts, callback) {
 
           if (!fs.existsSync(target.replace(/(\.png)$/, '.9$1')) && (!fs.existsSync(target) || (sourceTime > fs.statSync(target).mtime))) {
 
-            tasks.push(function(callback) {
+            tasks.push(function (callback) {
 
               if (inputSpec.dpi === spec.dpi) {
                 fs.copyFileSync(source, target);
@@ -257,22 +264,24 @@ exports.assets = function(opts, callback) {
               });
 
               // read
-              var convert = im(source);
+              var convert, original;
+              convert = original = im(source);
+
+
 
               // resize
-              convert.in('-resize', ((spec.dpi / inputSpec.dpi) * 100) + '%');
+              convert = convert.in('-resize', ((spec.dpi / inputSpec.dpi) * 100) + '%').quality(90).compress('Lossless');
 
               // show command
               if (cfg.trace) {
                 logger.debug('Executing: ' + convert.args().join(' ').cyan);
               }
 
-              convert.write(target, function(err) {
+              convert.write(target, function (err) {
 
                 if (err) {
                   return callback(err);
                 }
-
                 // async feedback for CLI
                 if (cfg.cli) {
                   logger.info('Generated: ' + target.cyan);
@@ -280,6 +289,7 @@ exports.assets = function(opts, callback) {
 
                 // pass back output
                 callback(null, target);
+
 
               });
 
@@ -296,7 +306,25 @@ exports.assets = function(opts, callback) {
 
       });
 
-      async.series(tasks, callback);
+      async.series(tasks, function (err) {
+        if (err) {
+          callback(err);
+        } else {
+          logger.info('imagemin ' + outputPaths);
+          Promise.all(outputPaths.map(output => {
+            return imagemin([output + '/*.{jpg,png}'], output, {
+              plugins: [
+                imageminJpegtran(),
+                imageminPngquant({ quality: '65-80' }),
+                imageminPngcrush()
+              ]
+            })
+          })).then(() => {
+            logger.info('done imagemin');
+            callback(null);
+          })
+        }
+      });
     });
 
   });
